@@ -1,0 +1,196 @@
+#! python3
+
+#Sufian comments version
+'''
+Overall, the code takes the raw recorded values (of voltage in relation to recording# made) recorded by the headcap, filters out any noise with a lowpass filter,
+then sets up the slope, peaks, areaUnderCurve into an excel sheet, calculating each value based on the voltage values (after scaling up the recordings as well).
+Does this for all 16 channel files, for 50ish trials, but skips badTrials if they don't meet the minimum requirement of displaying a recorded peak (pretty sure if
+the trial is just a straight line). The ERPAnalyzer function does all the work, the if statement on the bottom just initializes which files to pick and where to save
+'''
+
+import numpy as np
+import os
+import glob
+import matplotlib.pyplot as plt
+import ephysHelper # Has helper functions to load data into pretty classes
+import tkinter as Tk # makes the gui needed to open the files
+from tkinter.filedialog import askopenfilename,asksaveasfile, askdirectory
+from scipy import signal
+from statistics import mean
+
+def maxDiff(arr, baseline): #I think it finds the difference
+    index = 0
+    curMax = 0
+    curMaxVal = 0
+    for i, n in enumerate(arr):
+        curDiff = abs(n - baseline)
+        if curMax == 0 or curDiff > curMax:
+            curMax = curDiff
+            curMaxVal = n
+            index = i
+
+    return index, curMaxVal / 1000
+
+def ERPAnalyzer(dir, processorId, eventChannel, mainDir, prepend):
+    print(dir)
+    dir = dir
+    sr = 30000
+    preStim = 15000
+    postStim = 15000
+    windowLength = preStim + postStim # 30000 * (.05s + 1s)
+    
+    ## Create list of file names
+    fileList = []
+    os.chdir(dir)
+
+    ## Load in Continuous Data
+    dataList = []
+    tsStart = 0
+    for i in range(16):
+        print(str(processorId) + '_CH' + str(i+1) + '.continuous')
+        tempdata = ephysHelper.loadCon(str(processorId) + '_CH' + str(i+1) + '.continuous')
+        tsStart = tempdata.tsStart
+        tempLow = tempdata.lowPass() #filtered range is preset amount in eohysHelper, band = [4, 8]
+        dataList.append(tempLow)
+        #dataList.append(tempdata.data)
+    numChans = len(dataList)
+    
+    ## Load in Events
+    if numChans > 0:
+        events = ephysHelper.loadEvents(os.path.join(dir, "all_channels.events"), tsStart)
+    else:
+        raise NameError('No channels found!! Check processorId and dir')
+
+    ## Get list of event timestamps
+    eventTS = []
+    if False:
+        for n in range(len(events.ts)):
+            #print(events.channel[n])
+            if int(events.channel[n]) == eventChannel and events.eventId[n] == 1:
+                eventTS.append(events.ts[n])
+#else will always run since nothing is being false?^
+    else:
+        adc = ephysHelper.loadCon(str(processorId) + '_ADC1.continuous') #loadCon() loads data from continuous file
+        prevSamp = 0
+        curSamp = 0
+        for i in range(len(adc.data)):
+            curSamp = adc.data[i]
+            if prevSamp < 0.3 and curSamp > 0.3:
+                eventTS.append(int(adc.ts[i]))
+            prevSamp = curSamp
+
+    numEvents = len(eventTS)
+    print('num events', numEvents)
+
+    ## Create subplot to look at different data pieces. 
+
+    #numChans = len(dataList = contains data from .continous file per channel after that data has been filtered) = 16
+    #numEvents = len(eventTS = contains all the data from the continuous file) = as big as how many readings were taken
+
+    ## Create chunks of data
+    peaks = np.zeros((numChans, numEvents))
+    areaUnder = np.zeros((numChans, numEvents))
+    slopes = np.zeros((numChans, numEvents))
+    timeToPeak = np.zeros((numChans, numEvents))
+    badTrials = []
+
+    for chan in range(numChans):
+        chanBad = []
+        for i, ts in enumerate(eventTS):
+            baseline = mean(dataList[chan][int(ts-preStim):int(ts-(sr*0.1))]) # Prestim to a bit before the stim (slightly delayed stim event)
+            postStimData = dataList[chan][int(ts-500):int(ts+postStim)]
+            maxIndex, maxVal = maxDiff(postStimData, baseline)
+            if maxIndex > 5500 or maxIndex < 200:
+                chanBad.append(i)
+                
+                
+            else:
+                numPtBeforeStim = 10000
+                windowData = dataList[chan][int(ts-numPtBeforeStim):int(ts+postStim)]
+                startIndex = maxIndex + (numPtBeforeStim-500)
+                prevSlope = windowData[numPtBeforeStim] - windowData[numPtBeforeStim-1]
+                prevPoint = windowData[numPtBeforeStim]
+                slopeStartIndex = -1
+                for n in range(1,numPtBeforeStim):
+                    curSlope = prevPoint - windowData[numPtBeforeStim-n]
+                    if (prevSlope < 0 and curSlope >= 0) or (prevSlope > 0 and curSlope <= 0):
+                        baselineIndex = numPtBeforeStim - n
+                        slopeStartIndex = (baselineIndex + startIndex) / 2  
+                        break
+                    else:
+                        prevSlope = curSlope
+                        prevPoint = windowData[numPtBeforeStim-n]
+                if slopeStartIndex == -1: # only occurs if the data is a straight line, as in no changes between curSlope and prevSlope in the data
+                    chanBad.append(i) #says data in channel is bad
+                    continue
+
+
+                slopes[chan][i] = (windowData[int(slopeStartIndex - 100)] - windowData[int(slopeStartIndex + 100)]) / 200 #slopeStartIndex becomes very big though, probably to scale up from the microvolts?
+                peaks[chan][i] = maxVal #equal to baseline which is mean of range of data which is recorded before the stimulation
+                areaUnder[chan][i] = sum(abs(postStimData)) #is a range of data, also scaled up, postStimData is what is plotted
+                timeToPeak[chan][i] = startIndex - baselineIndex #displays how long it took after stimulation to have the brain region being recorded, peak
+
+
+                #if i <50:
+                #print('first point', windowData[int(slopeStartIndex - 100)])
+                #print('second point', windowData[int(slopeStartIndex + 100)])
+                #print('slope', (windowData[int(slopeStartIndex + 100)] - windowData[int(slopeStartIndex - 100)]) / 200 )
+                #######plt.plot(postStimData, color = 'k')
+                #plt.axvline(numPtBeforeStim, color = 'k')
+                #plt.axvline(baselineIndex, color = 'k')
+                #plt.axvline(baselineIndex, color = 'g')
+                #plt.axvline(startIndex, color = 'g')
+                #plt.axvline(slopeStartIndex - 100, color = 'r')
+                #plt.axvline(slopeStartIndex + 100, color = 'r')
+                #plt.axvline(numPtBeforeStim, color='k')
+                #plt.axhline(baseline, color='k')
+                #plt.fill_between(np.arange(0,15500),baseline,postStimData)
+                ##plt.title('ERP LFP') # + string(chan) for name specificity
+                ##plt.xlabel('Samples')
+                ##plt.ylabel('uVolts')
+                ##plt.show()
+
+                
+        badTrials.append(chanBad)
+        print('chan' , chan+1, 'num bad trials', badTrials[chan])
+    
+
+    ## Write to file
+    dirName = os.path.basename(os.path.normpath(dir))
+    f = open(mainDir + '/' + prepend + '_ERP_MASTER_'+dirName+'.csv', 'w')
+    for chan in range(numChans):
+        if chan !=0:
+            f.write(',,,\n,,,\n,,,\n')
+        f.write('Channel,,,' + str(chan+1) + '\nindex,Slope,Peak,Area Under Curve\n')
+        for i in range(numEvents):
+            if i not in badTrials[chan]:
+                f.write(str(i+1) + ',' + str(slopes[chan][i]) + ',' + str(peaks[chan][i]) + ',' + str(areaUnder[chan][i]))
+                f.write('\n')
+    
+    f.close()
+
+
+if __name__ == "__main__":
+    # Select all the folders needed. Select a bunch until cancel.
+    root = Tk.Tk()
+    procIDs = []
+    dirs = []
+    prependText = []
+    print('where to save files?')
+    mainDir = askdirectory()
+    print("main directory ", mainDir)
+    while True:
+        x = askopenfilename()
+        if (x!=''):
+            path, file = os.path.split(x)
+            print(file)
+            print(path)
+            dirs.append(path)
+            procIDs.append(file[:3])
+            prependText.append(input('Enter the order of this file. eg "01": '))
+        else:
+            break
+    print(dirs, procIDs, prependText)
+    eventChannel = 1
+    for dir, procID, prepend in zip(dirs, procIDs, prependText):
+        ERPAnalyzer(dir, procID, eventChannel, mainDir, prepend)
