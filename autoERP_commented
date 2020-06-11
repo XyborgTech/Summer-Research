@@ -63,6 +63,8 @@ def ERPAnalyzer(dir, processorId, eventChannel, mainDir, prepend):
 
     ## Get list of event timestamps
     eventTS = []
+    
+###This if statement confused me,     
     if False:
         for n in range(len(events.ts)):
             #print(events.channel[n])
